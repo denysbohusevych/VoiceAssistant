@@ -1,10 +1,10 @@
-use crossbeam_channel::{bounded, Receiver};
+use crossbeam_channel::{bounded, Sender};
 use rdev::{listen, Event, EventType, Key};
 
-use super::{HotkeyConfig, HotkeyError, HotkeyEvent, HotkeyHandle, HotkeyKey, HotkeyModifier};
+use crate::events::PipelineAction;
+use super::{HotkeyConfig, HotkeyError, HotkeyHandle, HotkeyKey, HotkeyModifier};
 
-pub fn spawn(config: HotkeyConfig) -> Result<(HotkeyHandle, Receiver<HotkeyEvent>), HotkeyError> {
-    let (event_tx, event_rx) = bounded::<HotkeyEvent>(32);
+pub fn spawn(config: HotkeyConfig, action_tx: Sender<PipelineAction>) -> Result<HotkeyHandle, HotkeyError> {
     let (stop_tx, _stop_rx)  = bounded::<()>(1);
 
     let ptt_key  = to_rdev_key(&config.push_to_talk.key);
@@ -34,7 +34,7 @@ pub fn spawn(config: HotkeyConfig) -> Result<(HotkeyHandle, Receiver<HotkeyEvent
             match &event.event_type {
                 EventType::KeyPress(k) if *k == ptt_key && mods_ok && !ptt_held => {
                     ptt_held = true;
-                    let tx = event_tx.clone();
+                    let tx = action_tx.clone();
 
                     // Важно: Вызываем хелпер в отдельном микро-потоке!
                     // Глобальный хук rdev требует мгновенного возврата управления,
@@ -42,7 +42,7 @@ pub fn spawn(config: HotkeyConfig) -> Result<(HotkeyHandle, Receiver<HotkeyEvent
                     std::thread::spawn(move || {
                         if let Some((pid, name)) = frontmost_app() {
                             eprintln!("[hotkey] нажат, цель: {} (pid={})", name, pid);
-                            let _ = tx.try_send(HotkeyEvent::PushToTalkPressed { pid });
+                            let _ = tx.try_send(PipelineAction::StartSession { target_pid: pid });
                         } else {
                             eprintln!("[hotkey] ⚠️ Не удалось определить активное окно");
                         }
@@ -50,7 +50,7 @@ pub fn spawn(config: HotkeyConfig) -> Result<(HotkeyHandle, Receiver<HotkeyEvent
                 }
                 EventType::KeyRelease(k) if *k == ptt_key && ptt_held => {
                     ptt_held = false;
-                    let _ = event_tx.try_send(HotkeyEvent::PushToTalkReleased);
+                    let _ = action_tx.try_send(PipelineAction::StopSession);
                 }
                 _ => {}
             }
@@ -61,7 +61,7 @@ pub fn spawn(config: HotkeyConfig) -> Result<(HotkeyHandle, Receiver<HotkeyEvent
         }
     });
 
-    Ok((HotkeyHandle::new(stop_tx), event_rx))
+    Ok(HotkeyHandle::new(stop_tx))
 }
 
 fn frontmost_app() -> Option<(u32, String)> {

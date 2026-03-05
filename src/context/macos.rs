@@ -65,17 +65,9 @@ unsafe fn dict_i32(dict: CFDictionaryRef, key: &str) -> Option<i32> {
 // ─── Интеграция с ax-helper ───────────────────────────────────────────────────
 
 fn run_ax_helper(args: &[&str]) -> Option<String> {
-    // 1. Получаем полный путь к текущему запущенному Rust-бинарнику (VoiceAssistant)
     let mut ax_helper_path = std::env::current_exe().expect("Не удалось получить путь к exe");
-
-    // 2. Убираем имя файла VoiceAssistant, чтобы остаться в его директории (target/release)
     ax_helper_path.pop();
-
-    // 3. Добавляем имя нашего Swift-скрипта
     ax_helper_path.push("ax-helper-bin");
-
-    // ЛОГ: Показываем абсолютный путь, который будем запускать
-    println!("  [ax-helper] Выполняю: {} {}", ax_helper_path.display(), args.join(" "));
 
     let output = match Command::new(&ax_helper_path).args(args).output() {
         Ok(out) => out,
@@ -89,16 +81,10 @@ fn run_ax_helper(args: &[&str]) -> Option<String> {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
 
     if !stderr.is_empty() {
-        eprintln!("  [ax-helper] ⚠️ STDERR:\n{}", stderr);
+        eprintln!("  [ax-helper stderr] {}", stderr);
     }
 
     if output.status.success() {
-        if args[0] == "capture" {
-            println!("  [ax-helper] ✅ Успешно. Получен JSON пути (длина: {})", stdout.len());
-            println!("{}", stdout);
-        } else {
-            println!("  [ax-helper] ✅ Успешно: {}", stdout);
-        }
         Some(stdout)
     } else {
         eprintln!("  [ax-helper] ❌ Команда {} завершилась с ошибкой: {}", args[0], output.status);
@@ -113,11 +99,10 @@ fn capture_screenshot_via_helper(pid: u32) -> Option<Vec<u8>> {
         match fs::read(&temp_path) {
             Ok(bytes) => {
                 let _ = fs::remove_file(&temp_path);
-                println!("  [ax-helper] 📸 Скриншот прочитан ({} байт)", bytes.len());
                 Some(bytes)
             }
             Err(e) => {
-                eprintln!("  [ax-helper] ❌ Не удалось прочитать скриншот из {}: {}", temp_path, e);
+                eprintln!("  [ax-helper] ❌ Не удалось прочитать скриншот: {}", e);
                 None
             }
         }
@@ -127,8 +112,7 @@ fn capture_screenshot_via_helper(pid: u32) -> Option<Vec<u8>> {
 }
 
 fn capture_ax_path_via_helper(pid: u32) -> Option<String> {
-    let pid_str = pid.to_string();
-    run_ax_helper(&["capture", &pid_str])
+    run_ax_helper(&["capture", &pid.to_string()])
 }
 
 // ─── Реализация ───────────────────────────────────────────────────────────────
@@ -137,16 +121,15 @@ pub struct MacOsContextCapture;
 
 impl MacOsContextCapture {
     pub fn new() -> Self { Self }
+}
 
-    fn do_capture(&self, pid: u32) -> Result<AppSnapshot, ContextError> {
-        let app_name        = app_name_for_pid(pid).unwrap_or_else(|| "Unknown".into());
-        println!("  [capture] 🔍 Захват контекста для PID: {} ({})", pid, app_name);
+impl ContextCapture for MacOsContextCapture {
+    fn capture_for_pid(&self, pid: u32) -> Result<AppSnapshot, ContextError> {
+        let app_name = app_name_for_pid(pid).unwrap_or_else(|| "Unknown".into());
+        eprintln!("  [capture] 🔍 Захват контекста для PID: {} ({})", pid, app_name);
 
-        // Получаем координаты и id окна через нативные вызовы
         let cursor          = mouse_location();
         let window_id       = window_id_for_pid(pid);
-
-        // Получаем скриншот и json-путь (для будущего инжекта) через наш бинарник
         let screenshot      = capture_screenshot_via_helper(pid);
         let ax_element_path = capture_ax_path_via_helper(pid);
 
@@ -161,28 +144,7 @@ impl MacOsContextCapture {
     }
 }
 
-impl ContextCapture for MacOsContextCapture {
-    fn capture(&self) -> Result<AppSnapshot, ContextError> {
-        let pid = frontmost_pid().ok_or(ContextError::NoFrontmostApp)?;
-        self.do_capture(pid)
-    }
-
-    fn capture_for_pid(&self, pid: u32) -> Result<AppSnapshot, ContextError> {
-        self.do_capture(pid)
-    }
-}
-
 // ─── Системные вызовы ─────────────────────────────────────────────────────────
-
-fn frontmost_pid() -> Option<u32> {
-    unsafe {
-        let ws:  *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
-        let app: *mut Object = msg_send![ws, frontmostApplication];
-        if app.is_null() { return None; }
-        let pid: i32 = msg_send![app, processIdentifier];
-        Some(pid as u32)
-    }
-}
 
 fn app_name_for_pid(pid: u32) -> Option<String> {
     unsafe {

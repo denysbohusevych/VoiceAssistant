@@ -75,13 +75,6 @@ impl Default for HotkeyConfig {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum HotkeyEvent {
-    /// Клавиша нажата. pid — процесс который был активен В МОМЕНТ нажатия.
-    PushToTalkPressed { pid: u32 },
-    PushToTalkReleased,
-}
-
 #[derive(Debug)]
 pub enum HotkeyError {
     PermissionDenied,

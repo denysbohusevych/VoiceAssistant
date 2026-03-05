@@ -1,116 +1,126 @@
-use std::path::{Path, PathBuf};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
+use super::Transcriber;
 
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+// C-совместимая функция для перехвата логов whisper.cpp
+unsafe extern "C" fn silent_log_callback(
+    _level: u32,
+    _text: *const i8,
+    _user_data: *mut std::ffi::c_void,
+) {
+    // Ничего не делаем, логи летят в пустоту
+}
 
-use super::{Segment, Transcriber, TranscriberError, TranscribeConfig};
-
-/// Транскрибер на основе локального whisper.cpp.
-/// Модель загружается один раз при создании и переиспользуется.
 pub struct WhisperTranscriber {
-    ctx: WhisperContext,
-    model_path: PathBuf,
+    // ВАЖНО: Поле state должно быть объявлено ДО context!
+    // В Rust поля структуры удаляются в порядке их объявления (сверху вниз).
+    // Это гарантирует, что мы освободим C++ память state строго до того,
+    // как будет удален сам context, избегая ошибок use-after-free.
+    state: Option<WhisperState<'static>>,
+    context: WhisperContext,
 }
 
 impl WhisperTranscriber {
-    /// Создать транскрибер, загрузив GGML-модель из `model_path`.
-    ///
-    /// Модели можно скачать с:
-    /// https://huggingface.co/ggerganov/whisper.cpp/tree/main
-    ///
-    /// Рекомендуемые варианты:
-    ///   ggml-tiny.bin   (~75 MB)  — быстро, менее точно
-    ///   ggml-base.bin   (~142 MB) — хороший баланс ← рекомендую начать с него
-    ///   ggml-small.bin  (~466 MB) — точнее, медленнее
-    ///   ggml-medium.bin (~1.5 GB) — очень точно
-    ///   ggml-large.bin  (~3 GB)   — максимальная точность
-    pub fn new(model_path: impl AsRef<Path>) -> Result<Self, TranscriberError> {
-        let model_path = model_path.as_ref().to_path_buf();
+    pub fn new(model_path: &str) -> Result<Self, String> {
+        // 1. Отключаем хардварные логи Apple Metal (ggml_metal_init)
+        // Это заставит бэкенд Metal замолчать навсегда и не спамить аллокациями.
+        std::env::set_var("GGML_METAL_NDEBUG", "1");
 
-        if !model_path.exists() {
-            return Err(TranscriberError::ModelNotFound(
-                model_path.display().to_string(),
-            ));
+        // 2. Глушим общие текстовые логи whisper.cpp
+        unsafe {
+            whisper_rs::set_log_callback(Some(silent_log_callback), std::ptr::null_mut());
         }
 
         let params = WhisperContextParameters::default();
-        let ctx = WhisperContext::new_with_params(
-            model_path.to_str().unwrap_or_default(),
-            params,
-        )
-            .map_err(|e| TranscriberError::InitError(e.to_string()))?;
+        let context = WhisperContext::new_with_params(model_path, params)
+            .map_err(|e| format!("Ошибка загрузки модели Whisper (путь: {}): {}", model_path, e))?;
 
-        Ok(Self { ctx, model_path })
-    }
-
-    /// Путь к загруженной модели.
-    pub fn model_path(&self) -> &Path {
-        &self.model_path
+        Ok(Self {
+            state: None,
+            context,
+        })
     }
 }
 
 impl Transcriber for WhisperTranscriber {
-    fn transcribe(
-        &mut self,
-        samples: &[f32],
-        config: &TranscribeConfig,
-    ) -> Result<Vec<Segment>, TranscriberError> {
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| TranscriberError::InitError(e.to_string()))?;
-
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-
-        // Язык
-        match config.language.as_deref() {
-            Some("auto") | None => params.set_language(None), // автоопределение
-            Some(lang)          => params.set_language(Some(lang)),
+    fn transcribe(&mut self, audio_data: &[f32]) -> Result<String, String> {
+        if audio_data.is_empty() {
+            return Ok(String::new());
         }
 
-        // Режим перевода
-        params.set_translate(config.translate);
+        // Инициализируем (аллоцируем) state только ОДИН раз при первой записи
+        if self.state.is_none() {
+            let state = self.context.create_state()
+                .map_err(|e| format!("Ошибка создания state: {}", e))?;
 
-        // Многопоточность
-        params.set_n_threads(config.n_threads);
+            // SAFETY: whisper-rs хранит реальные данные в куче (через C++ pointers).
+            // Перемещение структуры WhisperTranscriber в другой поток не меняет
+            // адреса context в памяти. Мы можем искусственно продлить время жизни
+            // ссылки до 'static. Удаление безопасно из-за порядка полей в struct.
+            let static_state: WhisperState<'static> = unsafe { std::mem::transmute(state) };
+            self.state = Some(static_state);
+            eprintln!("  [whisper] 🧠 Буферы нейросети выделены (состояние кэшировано)");
+        }
 
-        // Убираем лишние логи whisper.cpp в stderr
-        params.set_print_realtime(false);
+        let state = self.state.as_mut().unwrap();
+
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_language(None);
+
+        // Жестко запрещаем внутренние принты
+        params.set_print_special(false);
         params.set_print_progress(false);
+        params.set_print_realtime(false);
         params.set_print_timestamps(false);
 
-        // Запуск инференса
-        state
-            .full(params, samples)
-            .map_err(|e| TranscriberError::TranscribeError(e.to_string()))?;
+        params.set_suppress_blank(true);
+        params.set_suppress_non_speech_tokens(true);
 
-        // Собираем сегменты
-        let n = state
-            .full_n_segments()
-            .map_err(|e| TranscriberError::TranscribeError(e.to_string()))?;
+        // 🚀 НОВЫЕ ПАРАМЕТРЫ: БОРЬБА С ГАЛЛЮЦИНАЦИЯМИ И СКОРОСТЬ
 
-        let mut segments = Vec::with_capacity(n as usize);
-        for i in 0..n {
-            let text = state
-                .full_get_segment_text(i)
-                .map_err(|e| TranscriberError::TranscribeError(e.to_string()))?
-                .trim()
-                .to_string();
+        // 1. Ускоряет обработку, объединяя всё в один сегмент (нам не нужны субтитры с таймкодами)
+        params.set_single_segment(true);
 
-            let start_ms = state
-                .full_get_segment_t0(i)
-                .map_err(|e| TranscriberError::TranscribeError(e.to_string()))?
-                * 10; // whisper отдаёт в сантисекундах → мс
+        // 2. Порог тишины (0.6). Если вероятность наличия речи ниже, модель сразу прерывает работу.
+        // Это мгновенно решает проблему долгих тормозов на пустом аудио.
+        params.set_no_speech_thold(0.6);
 
-            let end_ms = state
-                .full_get_segment_t1(i)
-                .map_err(|e| TranscriberError::TranscribeError(e.to_string()))?
-                * 10;
+        // 3. Порог энтропии (2.4). Как только модель начинает зацикливаться
+        // ("Okay. Yep. Okay. Yep."), она останавливается.
+        params.set_entropy_thold(2.4);
 
-            if !text.is_empty() {
-                segments.push(Segment { start_ms, end_ms, text });
+        // Функция whisper_full сама корректно очищает рабочую память
+        // внутри state перед каждым новым запуском, поэтому переиспользование абсолютно безопасно.
+        state.full(params, audio_data)
+            .map_err(|e| format!("Ошибка инференса: {}", e))?;
+
+        let num_segments = state.full_n_segments()
+            .map_err(|e| format!("Ошибка получения сегментов: {}", e))?;
+
+        let mut result = String::new();
+        for i in 0..num_segments {
+            // Вытаскиваем текст только тех сегментов, где модель уверена, что это речь
+            if let Ok(segment) = state.full_get_segment_text(i) {
+                // Дополнительная зачистка от мусорных тегов, которые иногда прорываются
+                let clean = segment
+                    .replace("[BLANK_AUDIO]", "")
+                    .replace("[Silence]", "")
+                    .replace("(silence)", "")
+                    .replace("[Музыка]", "")
+                    .replace("[Music]", "");
+
+                result.push_str(&clean);
+                result.push(' ');
             }
         }
 
-        Ok(segments)
+        let final_text = result.trim().to_string();
+
+        // Если после зачистки остался только мусор - возвращаем пустую строку
+        let hallucinations = ["Okay.", "Yep.", "Sounds good.", "Cool.", "Damn."];
+        if hallucinations.iter().any(|&h| final_text.trim() == h) {
+            return Ok(String::new());
+        }
+
+        Ok(final_text)
     }
 }
