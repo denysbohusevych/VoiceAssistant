@@ -1,0 +1,2 @@
+[env]
+WHISPER_METAL_EMBED_LIBRARY = "1"
