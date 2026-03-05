@@ -15,7 +15,7 @@ use context::macos::MacOsContextCapture;
 use recorder::cpal_recorder::CpalRecorder;
 use transcriber::whisper::WhisperTranscriber;
 
-const WHISPER_MODEL_PATH: &str = "models/ggml-base.bin";
+const WHISPER_MODEL_PATH: &str = "models/ggml-small.bin";
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("🎙️ VoiceAssistant AI запущен!");

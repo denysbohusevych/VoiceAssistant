@@ -13,7 +13,7 @@ hound             = "3.5"
 ctrlc             = { version = "3.4", features = ["termination"] }
 crossbeam-channel = "0.5"
 chrono            = "0.4"
-whisper-rs        = { version = "0.11" , features = ["metal"] }
+whisper-rs        = { version = "0.11" }#, features = ["metal"] }
 
 rdev = "0.5"
 serde = { version = "1.0.228", features = ["derive"] }

@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::events::{PipelineAction, WorkerEvent};
@@ -18,7 +18,6 @@ pub fn spawn_audio_worker(
         let mut audio_rx: Option<Receiver<f32>> = None;
 
         let mut audio_buffer = Vec::new();
-        let mut last_transcribe_time = Instant::now();
 
         loop {
             // 1. Проверяем команды от Оркестратора (хоткеи)
@@ -27,7 +26,6 @@ pub fn spawn_audio_worker(
                     PipelineAction::StartSession { .. } => {
                         is_recording = true;
                         audio_buffer.clear();
-                        last_transcribe_time = Instant::now();
 
                         match recorder.start_recording() {
                             Ok((stream, rx)) => {
@@ -56,7 +54,9 @@ pub fn spawn_audio_worker(
                         }
                         audio_rx = None;
 
-                        // Финальная транскрипция всего буфера
+                        // ФИНАЛЬНАЯ ТРАНСКРИПЦИЯ:
+                        // Делается ровно один раз, на всём собранном буфере.
+                        // Это исключает любые дубликаты и заикания!
                         if !audio_buffer.is_empty() {
                             match transcriber.transcribe(&audio_buffer) {
                                 Ok(text) if !text.is_empty() => {
@@ -75,30 +75,16 @@ pub fn spawn_audio_worker(
                 }
             }
 
-            // 2. Если мы сейчас пишем звук, собираем его и периодически делаем частичный инференс
+            // 2. Если мы сейчас пишем звук, ПРОСТО СОБИРАЕМ ЕГО (без промежуточного инференса)
             if is_recording {
                 if let Some(rx) = &audio_rx {
                     while let Ok(sample) = rx.try_recv() {
                         audio_buffer.push(sample);
                     }
-
-                    // Каждые 1.5 секунды пробуем распознать промежуточный текст
-                    // (чтобы пользователь видел, что система его слышит)
-                    if last_transcribe_time.elapsed() >= Duration::from_millis(1500) && audio_buffer.len() > 16000 {
-                        // В реальном приложении здесь лучше использовать VAD (Voice Activity Detection),
-                        // но для прототипа сойдет инференс по таймеру
-                        match transcriber.transcribe(&audio_buffer) {
-                            Ok(text) if !text.is_empty() => {
-                                let _ = event_tx.send(WorkerEvent::PartialTranscription(text));
-                            }
-                            _ => {}
-                        }
-                        last_transcribe_time = Instant::now();
-                    }
                 }
             }
 
-            // Немного спим, чтобы не сжечь CPU пустим циклом (Polling)
+            // Спим 50 мс, чтобы не грузить CPU бесконечным циклом
             std::thread::sleep(Duration::from_millis(50));
         }
     });

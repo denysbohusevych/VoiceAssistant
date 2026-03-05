@@ -1,11 +1,38 @@
 // build.rs
-// Находит ggml-metal.metal в cargo registry и копирует его в OUT_DIR,
-// а также выводит путь чтобы можно было скопировать рядом с бинарём.
-
 use std::path::PathBuf;
+use std::process::Command;
 
 fn main() {
-    // Ищем ggml-metal.metal в ~/.cargo/registry
+    // 1. Скачивание модели (если она еще не скачана)
+    let model_path = PathBuf::from("models/ggml-base.bin");
+    if !model_path.exists() {
+        println!("cargo:warning=Модель ggml-base.bin не найдена. Начинаю скачивание...");
+        let status = Command::new("sh")
+            .args(&["models/download.sh", "base"])
+            .status()
+            .expect("Не удалось запустить models/download.sh");
+
+        if !status.success() {
+            panic!("Ошибка при скачивании модели Whisper!");
+        }
+    }
+
+    // 2. Сборка Swift-бинарника ax-helper
+    println!("cargo:warning=Сборка ax-helper...");
+    let swift_status = Command::new("sh")
+        .arg("ax-helper/buildSwift.sh")
+        .status()
+        .expect("Не удалось запустить ax-helper/buildSwift.sh");
+
+    if !swift_status.success() {
+        panic!("Ошибка при сборке ax-helper!");
+    }
+
+    // Говорим Cargo пересобрать проект, если мы изменили код Swift-хелпера
+    println!("cargo:rerun-if-changed=ax-helper/main.swift");
+    println!("cargo:rerun-if-changed=ax-helper/buildSwift.sh");
+
+    // 3. Твой оригинальный код для копирования ggml-metal.metal
     let home = std::env::var("HOME").unwrap_or_default();
     let registry = PathBuf::from(&home).join(".cargo/registry/src");
 
@@ -13,7 +40,6 @@ fn main() {
 
     match metal_file {
         Some(src) => {
-            // Копируем в корень проекта (CARGO_MANIFEST_DIR)
             let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
             let dst = PathBuf::from(&manifest_dir).join("ggml-metal.metal");
 
@@ -22,7 +48,6 @@ fn main() {
                 println!("cargo:warning=Скопирован ggml-metal.metal из {}", src.display());
             }
 
-            // Говорим компилятору пересобрать если файл изменился
             println!("cargo:rerun-if-changed=ggml-metal.metal");
         }
         None => {
