@@ -4,7 +4,7 @@ pub mod macos;
 use std::fmt;
 use crossbeam_channel::{Receiver, Sender};
 use crate::events::{PipelineAction, WorkerEvent};
-use crate::vision::layout::process_dump_to_markdown;
+use crate::vision::layout::build_layout_from_dump;
 
 /// Снимок активного приложения.
 #[derive(Debug, Clone)]
@@ -81,8 +81,14 @@ pub fn spawn_worker(
                                         .output()
                                     {
                                         Ok(out) if out.status.success() => {
+
+                                            let stderr = String::from_utf8_lossy(&out.stderr);
+                                            if !stderr.trim().is_empty() {
+                                                eprintln!("{}", stderr);
+                                            }
+
                                             let json_str = String::from_utf8_lossy(&out.stdout);
-                                            let md_text = process_dump_to_markdown(&json_str);
+                                            let md_text = build_layout_from_dump(&json_str);
                                             let _ = event_tx.send(WorkerEvent::VisionProcessed(md_text));
                                         }
                                         Ok(out) => {
