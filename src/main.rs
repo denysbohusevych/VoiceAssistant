@@ -15,7 +15,8 @@ use context::macos::MacOsContextCapture;
 use recorder::cpal_recorder::CpalRecorder;
 use transcriber::whisper::WhisperTranscriber;
 
-const WHISPER_MODEL_PATH: &str = "models/ggml-small.bin";
+// Подключаем оптимизированную модель large-v3-turbo
+const WHISPER_MODEL_PATH: &str = "models/ggml-large-v3-turbo.bin";
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("🎙️ VoiceAssistant AI запущен!");
@@ -47,7 +48,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             if let events::PipelineAction::StartSession { target_pid } = action {
                 println!("\n--- Хоткей нажат ---");
-                // НОВОЕ: Сообщаем Оркестратору, что нужно начать собирать данные!
                 let _ = coordinator_tx.send(events::WorkerEvent::SessionStarted(target_pid));
             }
         }

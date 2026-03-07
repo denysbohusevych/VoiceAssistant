@@ -1,4 +1,3 @@
-// src/coordinator.rs
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use crate::events::WorkerEvent;
 
@@ -8,6 +7,7 @@ pub struct SessionData {
     pub app_name: Option<String>,
     pub ax_path_json: Option<String>,
     pub transcription: String,
+    pub partial_transcription: Option<String>,
     pub screen_markdown: Option<String>,
     pub is_audio_finished: bool,
     pub is_vision_finished: bool,
@@ -34,6 +34,12 @@ impl SessionData {
 
         md.push_str("\n## Транскрипция голоса:\n");
         md.push_str(self.transcription.trim());
+        if let Some(partial) = &self.partial_transcription {
+            if !self.transcription.is_empty() {
+                md.push(' ');
+            }
+            md.push_str(partial.trim());
+        }
         md.push('\n');
 
         md
@@ -64,7 +70,6 @@ impl Coordinator {
     pub fn run(&mut self) {
         while let Ok(event) = self.rx.recv() {
             match event {
-                // НОВОЕ: Оркестратор слушает старт сессии
                 WorkerEvent::SessionStarted(pid) => {
                     self.start_new_session(pid);
                 }
@@ -90,22 +95,22 @@ impl Coordinator {
                     }
                 }
                 WorkerEvent::PartialTranscription(text) => {
-                    print!("{} ", text);
+                    // Используем Carriage Return для перезаписи строки в терминале
+                    print!("\r\x1B[2K[Частично] {}", text);
                     use std::io::Write;
                     std::io::stdout().flush().ok();
                     if let Some(session) = &mut self.current_session {
-                        if !session.transcription.is_empty() {
-                            session.transcription.push(' ');
-                        }
-                        session.transcription.push_str(&text);
+                        session.partial_transcription = Some(text);
                     }
                 }
                 WorkerEvent::FinalTranscription(text) => {
+                    println!("\r\x1B[2K[Финально] {}", text);
                     if let Some(session) = &mut self.current_session {
                         if !session.transcription.is_empty() {
                             session.transcription.push(' ');
                         }
                         session.transcription.push_str(&text);
+                        session.partial_transcription = None;
                     }
                 }
                 WorkerEvent::AudioFinished => {

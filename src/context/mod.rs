@@ -81,12 +81,6 @@ pub fn spawn_worker(
                                         .output()
                                     {
                                         Ok(out) if out.status.success() => {
-
-                                            let stderr = String::from_utf8_lossy(&out.stderr);
-                                            if !stderr.trim().is_empty() {
-                                                eprintln!("{}", stderr);
-                                            }
-
                                             let json_str = String::from_utf8_lossy(&out.stdout);
                                             let md_text = build_layout_from_dump(&json_str);
                                             let _ = event_tx.send(WorkerEvent::VisionProcessed(md_text));

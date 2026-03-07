@@ -1,17 +1,7 @@
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
 use super::Transcriber;
 use std::collections::HashSet;
 
-// C-совместимая функция для перехвата логов whisper.cpp
-unsafe extern "C" fn silent_log_callback(
-    _level: u32,
-    _text: *const i8,
-    _user_data: *mut std::ffi::c_void,
-) {
-    // Ничего не делаем, логи летят в пустоту
-}
-
-// Вспомогательная функция для очистки от мусора датасета и любых заиканий
 fn cleanup_and_deduplicate(text: &str) -> String {
     let clean = text
         .replace("[BLANK_AUDIO]", "")
@@ -22,10 +12,7 @@ fn cleanup_and_deduplicate(text: &str) -> String {
         .replace("Редактор субтитров", "")
         .replace("Корректор", "")
         .replace("А.Семкин", "")
-        .replace("А.Синецкая", "")
-        .replace("А.Егорова", "")
-        .replace("Н. Новикова", "")
-        .replace("Н. Закомолдина", "");
+        .replace("А.Синецкая", "");
 
     let mut parts = Vec::new();
     let mut current = String::new();
@@ -61,54 +48,59 @@ fn cleanup_and_deduplicate(text: &str) -> String {
 }
 
 pub struct WhisperTranscriber {
-    // Убрали state отсюда. Храним только контекст модели (саму нейросеть).
     context: WhisperContext,
+    // В 0.15.1 лайфтаймы были убраны, храним просто State
+    state: Option<WhisperState>,
+}
+
+impl Drop for WhisperTranscriber {
+    fn drop(&mut self) {
+        // Очищаем стейт при удалении
+        self.state.take();
+    }
 }
 
 impl WhisperTranscriber {
     pub fn new(model_path: &str) -> Result<Self, String> {
         std::env::set_var("GGML_METAL_NDEBUG", "1");
 
-        unsafe {
-            whisper_rs::set_log_callback(Some(silent_log_callback), std::ptr::null_mut());
-        }
-
         let params = WhisperContextParameters::default();
         let context = WhisperContext::new_with_params(model_path, params)
             .map_err(|e| format!("Ошибка загрузки модели Whisper: {}", e))?;
 
-        Ok(Self { context })
+        Ok(Self { context, state: None })
     }
 }
 
 impl Transcriber for WhisperTranscriber {
     fn transcribe(&mut self, audio_data: &[f32]) -> Result<String, String> {
+        if audio_data.len() < 4000 {
+            return Ok(String::new());
+        }
+
         if audio_data.is_empty() {
             return Ok(String::new());
         }
 
-        // 🛡️ АППАРАТНЫЙ ФИЛЬТР ТИШИНЫ (RMS Amplitude)
-        // Вычисляем среднюю громкость куска аудио.
-        // Если это просто белый шум или полная тишина - вообще не будим нейросеть.
-        let mut sum_squares = 0.0;
-        for &sample in audio_data {
-            sum_squares += sample * sample;
-        }
-        let rms = (sum_squares / audio_data.len() as f32).sqrt();
-
-        // Порог громкости (0.001 обычно отсекает пустой шум микрофона).
-        // Если текст всё равно не распознается, когда ты говоришь тихо - уменьши до 0.0005.
-        if rms < 0.001 {
-            return Ok(String::new());
+        // Если это первый запуск сессии, аллоцируем State ровно 1 раз
+        if self.state.is_none() {
+            let s = self.context.create_state()
+                .map_err(|e| format!("Ошибка создания state: {}", e))?;
+            self.state = Some(s);
         }
 
-        // 🧠 СВЕЖИЙ STATE НА КАЖДЫЙ ЗАПУСК
-        // Решает проблему "протекающего" контекста и диких галлюцинаций
-        let mut state = self.context.create_state()
-            .map_err(|e| format!("Ошибка создания state: {}", e))?;
+        let state = self.state.as_mut().unwrap();
 
+        // В 0.15.1 возвращаем best_of: 1
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(None);
+
+        // Явно передаем "auto", чтобы избежать ошибки вывода типа для Option<str>
+        params.set_language(Some("auto"));
+        // Запрещаем перевод (чтобы билингвальный текст оставался "как есть")
+        params.set_translate(false);
+
+        // Prompt-инъекция: заставляем модель понимать программирование и переключение языков
+        params.set_initial_prompt("Привет, это test voice command. Я пишу код на Rust, Python. System initialization.");
 
         params.set_print_special(false);
         params.set_print_progress(false);
@@ -116,9 +108,8 @@ impl Transcriber for WhisperTranscriber {
         params.set_print_timestamps(false);
 
         params.set_suppress_blank(true);
-        params.set_suppress_non_speech_tokens(true);
+        // set_suppress_non_speech_tokens был удален в последних версиях whisper.cpp
 
-        // Настройки строгости
         params.set_no_context(true);
         params.set_no_speech_thold(0.4);
         params.set_entropy_thold(2.4);
@@ -126,15 +117,19 @@ impl Transcriber for WhisperTranscriber {
         state.full(params, audio_data)
             .map_err(|e| format!("Ошибка инференса: {}", e))?;
 
-        let num_segments = state.full_n_segments()
-            .map_err(|e| format!("Ошибка получения сегментов: {}", e))?;
+        let num_segments = state.full_n_segments();
+        if num_segments < 0 {
+            return Err(format!("Ошибка получения сегментов: {}", num_segments));
+        }
 
         let mut raw_result = String::new();
 
         for i in 0..num_segments {
-            if let Ok(segment) = state.full_get_segment_text(i) {
-                raw_result.push_str(&segment);
-                raw_result.push(' ');
+            if let Some(segment) = state.get_segment(i) {
+                if let Ok(text) = segment.to_str() {
+                    raw_result.push_str(text);
+                    raw_result.push(' ');
+                }
             }
         }
 
@@ -152,9 +147,7 @@ impl Transcriber for WhisperTranscriber {
             .filter(|c| c.is_alphanumeric() || c.is_whitespace())
             .collect();
 
-        let normalized_final = normalized_final.trim();
-
-        if hallucinations.iter().any(|&h| normalized_final == h || normalized_final.starts_with("hello hello")) {
+        if hallucinations.iter().any(|&h| normalized_final.trim() == h || normalized_final.trim().starts_with("hello hello")) {
             return Ok(String::new());
         }
 
