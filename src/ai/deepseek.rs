@@ -1,51 +1,55 @@
 // src/ai/deepseek.rs
-//
-// Провайдер: DeepSeek
-// Документация: https://platform.deepseek.com/api-docs
-// API совместим с OpenAI — тот же формат запросов.
-//
-// Дефолтная модель: deepseek-chat  (DeepSeek-V3)
-// Другие модели:    deepseek-reasoner  (DeepSeek-R1 — медленнее, но лучше рассуждает)
-//
-// Получить ключ: https://platform.deepseek.com/api_keys
-
 use serde_json::{json, Value};
+use crate::config::SharedConfig;
 use super::{AiClient, AiError};
+use super::http::make_agent;
 
 pub struct DeepSeekClient {
     api_key: String,
     model:   String,
+    cfg:     SharedConfig,
 }
 
 impl DeepSeekClient {
-    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self { api_key: api_key.into(), model: model.into() }
+    pub fn new(
+        api_key: impl Into<String>,
+        model:   impl Into<String>,
+        cfg:     SharedConfig,
+    ) -> Self {
+        Self { api_key: api_key.into(), model: model.into(), cfg }
     }
 }
 
 impl AiClient for DeepSeekClient {
     fn complete(&self, system_prompt: &str, user_message: &str) -> Result<String, AiError> {
+        let (max_tokens, temperature, timeouts) = {
+            let c = self.cfg.read().unwrap();
+            (c.ai.max_tokens, c.ai.temperature, c.ai.http_timeouts.clone())
+        };
+
+        let agent = make_agent(&timeouts);
+
         let body = json!({
             "model": self.model,
             "messages": [
                 { "role": "system", "content": system_prompt },
                 { "role": "user",   "content": user_message  }
             ],
-            "temperature": 0.7,
-            "max_tokens": 2048
+            "temperature": temperature,
+            "max_tokens":  max_tokens
         });
 
-        let resp = ureq::post("https://api.deepseek.com/v1/chat/completions")
+        let resp = agent
+            .post("https://api.deepseek.com/v1/chat/completions")
             .set("Content-Type",  "application/json")
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .send_json(&body)
             .map_err(|e| match e {
                 ureq::Error::Status(401, _) => AiError::Auth(
-                    "Невалидный DEEPSEEK_API_KEY. Проверь ключ на https://platform.deepseek.com".into()
+                    "Невалидный DEEPSEEK_API_KEY. Проверь: https://platform.deepseek.com".into()
                 ),
                 ureq::Error::Status(status, resp) => {
-                    let body = resp.into_string().unwrap_or_default();
-                    AiError::Api { status, body }
+                    AiError::Api { status, body: resp.into_string().unwrap_or_default() }
                 }
                 other => AiError::Http(other.to_string()),
             })?;

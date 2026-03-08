@@ -1,30 +1,30 @@
 // src/ai/openai.rs
-//
-// Провайдер: OpenAI
-// Документация: https://platform.openai.com/docs/api-reference/chat
-//
-// Дефолтная модель: gpt-4o
-// Получить ключ: https://platform.openai.com/api-keys
-
 use serde_json::{json, Value};
+use crate::config::SharedConfig;
 use super::{AiClient, AiError};
+use super::http::make_agent;
 
 pub struct OpenAiClient {
     api_key:  String,
     model:    String,
     base_url: String,
+    cfg:      SharedConfig,
 }
 
 impl OpenAiClient {
-    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(
+        api_key:  impl Into<String>,
+        model:    impl Into<String>,
+        cfg:      SharedConfig,
+    ) -> Self {
         Self {
             api_key:  api_key.into(),
             model:    model.into(),
             base_url: "https://api.openai.com/v1".into(),
+            cfg,
         }
     }
 
-    /// Кастомный base_url — для Azure OpenAI, прокси или совместимых API.
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = url.into();
         self
@@ -33,6 +33,12 @@ impl OpenAiClient {
 
 impl AiClient for OpenAiClient {
     fn complete(&self, system_prompt: &str, user_message: &str) -> Result<String, AiError> {
+        let (max_tokens, temperature, timeouts) = {
+            let c = self.cfg.read().unwrap();
+            (c.ai.max_tokens, c.ai.temperature, c.ai.http_timeouts.clone())
+        };
+
+        let agent = make_agent(&timeouts);
         let url = format!("{}/chat/completions", self.base_url);
 
         let body = json!({
@@ -41,21 +47,21 @@ impl AiClient for OpenAiClient {
                 { "role": "system", "content": system_prompt },
                 { "role": "user",   "content": user_message  }
             ],
-            "temperature": 0.7,
-            "max_tokens": 2048
+            "temperature": temperature,
+            "max_tokens":  max_tokens
         });
 
-        let resp = ureq::post(&url)
-            .set("Content-Type", "application/json")
+        let resp = agent
+            .post(&url)
+            .set("Content-Type",  "application/json")
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .send_json(&body)
             .map_err(|e| match e {
                 ureq::Error::Status(401, _) => AiError::Auth(
-                    "Невалидный OPENAI_API_KEY. Проверь ключ на https://platform.openai.com/api-keys".into()
+                    "Невалидный OPENAI_API_KEY. Проверь: https://platform.openai.com/api-keys".into()
                 ),
                 ureq::Error::Status(status, resp) => {
-                    let body = resp.into_string().unwrap_or_default();
-                    AiError::Api { status, body }
+                    AiError::Api { status, body: resp.into_string().unwrap_or_default() }
                 }
                 other => AiError::Http(other.to_string()),
             })?;

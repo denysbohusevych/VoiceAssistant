@@ -1,3 +1,5 @@
+// src/hotkey/mod.rs
+
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(not(target_os = "macos"))]
@@ -5,10 +7,12 @@ pub mod rdev_impl;
 
 use std::fmt;
 
+// ─── Типы ─────────────────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hotkey {
     pub modifiers: Vec<HotkeyModifier>,
-    pub key: HotkeyKey,
+    pub key:       HotkeyKey,
 }
 
 impl Hotkey {
@@ -65,6 +69,7 @@ impl fmt::Display for HotkeyKey {
     }
 }
 
+/// Конфиг хоткеев (типизированный, из строкового конфига TOML).
 pub struct HotkeyConfig {
     pub push_to_talk: Hotkey,
 }
@@ -74,6 +79,54 @@ impl Default for HotkeyConfig {
         Self { push_to_talk: Hotkey::single(HotkeyKey::AltRight) }
     }
 }
+
+// ─── Парсинг строки в Hotkey ──────────────────────────────────────────────────
+
+/// Парсит строку из config.toml в типизированный `Hotkey`.
+///
+/// Поддерживаемые форматы:
+/// - `"AltRight"` → правый Option/Alt
+/// - `"CapsLock"` → Caps Lock
+/// - `"F1"`.."F12"` → функциональные клавиши
+/// - `"a"`, `"z"`, `"0"` → символьные клавиши
+/// - `"Ctrl+F5"`, `"Shift+a"` → с модификаторами
+pub fn parse_hotkey(s: &str) -> Hotkey {
+    let parts: Vec<&str> = s.split('+').collect();
+    let key_str = parts.last().unwrap_or(&"AltRight");
+
+    let mut modifiers = Vec::new();
+    for part in &parts[..parts.len().saturating_sub(1)] {
+        match part.to_lowercase().as_str() {
+            "ctrl"  | "control" => modifiers.push(HotkeyModifier::Ctrl),
+            "alt"               => modifiers.push(HotkeyModifier::Alt),
+            "shift"             => modifiers.push(HotkeyModifier::Shift),
+            "meta"  | "cmd"     => modifiers.push(HotkeyModifier::Meta),
+            _                   => eprintln!("⚠️  Неизвестный модификатор хоткея: {}", part),
+        }
+    }
+
+    let key = parse_key(key_str);
+    Hotkey { modifiers, key }
+}
+
+fn parse_key(s: &str) -> HotkeyKey {
+    match s {
+        "AltRight" | "altright" | "RightAlt" | "rightalt" => HotkeyKey::AltRight,
+        "CapsLock" | "capslock"                            => HotkeyKey::CapsLock,
+        "F1"  => HotkeyKey::F1,  "F2"  => HotkeyKey::F2,
+        "F3"  => HotkeyKey::F3,  "F4"  => HotkeyKey::F4,
+        "F5"  => HotkeyKey::F5,  "F6"  => HotkeyKey::F6,
+        "F7"  => HotkeyKey::F7,  "F8"  => HotkeyKey::F8,
+        "F9"  => HotkeyKey::F9,  "F10" => HotkeyKey::F10,
+        "F11" => HotkeyKey::F11, "F12" => HotkeyKey::F12,
+        other => {
+            let ch = other.chars().next().unwrap_or('a');
+            HotkeyKey::Char(ch)
+        }
+    }
+}
+
+// ─── Ошибки, Handle ───────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 pub enum HotkeyError {

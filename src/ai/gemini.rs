@@ -1,48 +1,49 @@
 // src/ai/gemini.rs
-//
-// Провайдер: Google Gemini
-// Документация: https://ai.google.dev/api/generate-content
-//
-// Дефолтная модель: gemini-2.0-flash
-// Получить ключ: https://aistudio.google.com/apikey
-
 use serde_json::json;
+use crate::config::SharedConfig;
 use super::{AiClient, AiError};
 use super::http::{make_agent, parse_json_response};
 
 pub struct GeminiClient {
     api_key: String,
     model:   String,
-    agent:   ureq::Agent,
+    cfg:     SharedConfig,
 }
 
 impl GeminiClient {
-    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self { api_key: api_key.into(), model: model.into(), agent: make_agent() }
+    pub fn new(
+        api_key: impl Into<String>,
+        model:   impl Into<String>,
+        cfg:     SharedConfig,
+    ) -> Self {
+        Self { api_key: api_key.into(), model: model.into(), cfg }
     }
 }
 
 impl AiClient for GeminiClient {
     fn complete(&self, system_prompt: &str, user_message: &str) -> Result<String, AiError> {
+        let (max_tokens, temperature, timeouts) = {
+            let c = self.cfg.read().unwrap();
+            (c.ai.max_tokens, c.ai.temperature, c.ai.http_timeouts.clone())
+        };
+
+        let agent = make_agent(&timeouts);
+
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
             self.model, self.api_key
         );
 
         let body = json!({
-            "system_instruction": {
-                "parts": [{ "text": system_prompt }]
-            },
-            "contents": [{
-                "parts": [{ "text": user_message }]
-            }],
+            "system_instruction": { "parts": [{ "text": system_prompt }] },
+            "contents": [{ "parts": [{ "text": user_message }] }],
             "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 20000
+                "temperature":     temperature,
+                "maxOutputTokens": max_tokens
             }
         });
 
-        let resp = self.agent
+        let resp = agent
             .post(&url)
             .set("Content-Type", "application/json")
             .send_json(&body)
@@ -50,14 +51,13 @@ impl AiClient for GeminiClient {
                 ureq::Error::Status(400, resp) => {
                     let body = resp.into_string().unwrap_or_default();
                     if body.contains("API_KEY_INVALID") || body.contains("API key not valid") {
-                        AiError::Auth("Невалидный GEMINI_API_KEY. Получи ключ: https://aistudio.google.com/apikey".into())
+                        AiError::Auth("Невалидный GEMINI_API_KEY. Получи: https://aistudio.google.com/apikey".into())
                     } else {
                         AiError::Api { status: 400, body }
                     }
                 }
                 ureq::Error::Status(status, resp) => {
-                    let body = resp.into_string().unwrap_or_default();
-                    AiError::Api { status, body }
+                    AiError::Api { status, body: resp.into_string().unwrap_or_default() }
                 }
                 other => AiError::Http(other.to_string()),
             })?;

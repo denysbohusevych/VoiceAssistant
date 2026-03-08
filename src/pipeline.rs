@@ -1,45 +1,55 @@
+// src/pipeline.rs
 use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender};
 
+use crate::config::SharedConfig;
 use crate::events::{PipelineAction, WorkerEvent};
 use crate::recorder::AudioRecorder;
 use crate::transcriber::Transcriber;
 
-/// Запускает независимый потоковый (Streaming) воркер для обработки звука
 pub fn spawn_audio_worker(
-    action_rx: Receiver<PipelineAction>,
-    event_tx: Sender<WorkerEvent>,
-    recorder: Box<dyn AudioRecorder>,
+    action_rx:   Receiver<PipelineAction>,
+    event_tx:    Sender<WorkerEvent>,
+    recorder:    Box<dyn AudioRecorder>,
     mut transcriber: Box<dyn Transcriber>,
+    cfg:         SharedConfig,
 ) {
     std::thread::spawn(move || {
-        let mut is_recording = false;
-        let mut audio_stream = None;
+        let mut is_recording     = false;
+        let mut audio_stream     = None;
         let mut audio_rx: Option<Receiver<f32>> = None;
 
-        let mut audio_buffer = Vec::new();
+        let mut audio_buffer      = Vec::new();
         let mut last_process_time = Instant::now();
-        let mut last_rms_idx = 0;
-        let chunk_duration = Duration::from_millis(500);
-
-        // Порог тишины (увеличили с 0.001 до 0.005, чтобы отсекать фоновый шум комнаты)
-        let silence_threshold = 0.005;
+        let mut last_rms_idx      = 0usize;
 
         loop {
-            // 1. Проверяем команды от Оркестратора (хоткеи)
+            // ─── Читаем актуальные пороги из конфига ──────────────────────────
+            let (silence_threshold, chunk_duration, sliding_window_samples, overlap_samples) = {
+                let c = cfg.read().unwrap();
+                let sr = 16000u64;
+                (
+                    c.audio.silence_threshold,
+                    Duration::from_millis(c.audio.chunk_duration_ms),
+                    (c.audio.sliding_window_max_seconds * sr as f32) as usize,
+                    (c.audio.overlap_seconds * sr as f32) as usize,
+                )
+            };
+
+            // ─── Команды от оркестратора ──────────────────────────────────────
             while let Ok(action) = action_rx.try_recv() {
                 match action {
                     PipelineAction::StartSession { .. } => {
                         is_recording = true;
                         audio_buffer.clear();
-                        last_rms_idx = 0;
+                        last_rms_idx      = 0;
                         last_process_time = Instant::now();
 
                         match recorder.start_recording() {
                             Ok((stream, rx)) => {
                                 audio_stream = Some(stream);
-                                audio_rx = Some(rx);
-                                eprintln!("  [audio] 🎙️ Запись пошла (потоковый режим)...");
+                                audio_rx     = Some(rx);
+                                eprintln!("  [audio] 🎙️ Запись пошла...");
                             }
                             Err(e) => {
                                 let _ = event_tx.send(WorkerEvent::AudioError(e));
@@ -50,24 +60,15 @@ pub fn spawn_audio_worker(
                     PipelineAction::StopSession => {
                         is_recording = false;
                         eprintln!("  [audio] ⏹️ Остановка записи...");
-
                         audio_stream = None;
 
-                        // Дочитываем остатки
                         if let Some(rx) = &audio_rx {
-                            while let Ok(sample) = rx.try_recv() {
-                                audio_buffer.push(sample);
-                            }
+                            while let Ok(s) = rx.try_recv() { audio_buffer.push(s); }
                         }
                         audio_rx = None;
 
-                        // Финализируем всё, что осталось в буфере (если это не тишина)
                         if !audio_buffer.is_empty() {
-                            let mut sum_sq = 0.0;
-                            for &s in &audio_buffer { sum_sq += s * s; }
-                            let rms = (sum_sq / audio_buffer.len() as f32).sqrt();
-
-                            // Защита от тишины при отпускании кнопки
+                            let rms = compute_rms(&audio_buffer);
                             if rms >= silence_threshold {
                                 if let Ok(text) = transcriber.transcribe(&audio_buffer) {
                                     if !text.is_empty() {
@@ -75,63 +76,50 @@ pub fn spawn_audio_worker(
                                     }
                                 }
                             } else {
-                                eprintln!("  [audio] 🔇 Пропуск транскрибации (чистая тишина, RMS: {:.4})", rms);
+                                eprintln!("  [audio] 🔇 Тишина при стопе (RMS={:.4})", rms);
                             }
                         }
-
                         let _ = event_tx.send(WorkerEvent::AudioFinished);
                     }
                 }
             }
 
-            // 2. Real-time обработка "Растущим Окном" и VAD
+            // ─── Real-time обработка ──────────────────────────────────────────
             if is_recording {
                 if let Some(rx) = &audio_rx {
-                    while let Ok(sample) = rx.try_recv() {
-                        audio_buffer.push(sample);
-                    }
+                    while let Ok(s) = rx.try_recv() { audio_buffer.push(s); }
                 }
 
-                // Каждые ~500мс проверяем буфер
-                if last_process_time.elapsed() >= chunk_duration && audio_buffer.len() > last_rms_idx {
-                    let new_samples = &audio_buffer[last_rms_idx..];
-
-                    let mut sum_sq = 0.0;
-                    for &s in new_samples { sum_sq += s * s; }
-                    let rms = (sum_sq / new_samples.len() as f32).sqrt();
-
+                if last_process_time.elapsed() >= chunk_duration
+                    && audio_buffer.len() > last_rms_idx
+                {
+                    let new_rms = compute_rms(&audio_buffer[last_rms_idx..]);
                     last_rms_idx = audio_buffer.len();
 
-                    if rms < silence_threshold {
-                        // VAD: Тишина обнаружена -> Финализируем (Slice)
-                        if !audio_buffer.is_empty() {
-                            // Проверяем RMS всего накопленного буфера перед отправкой
-                            let mut full_sum_sq = 0.0;
-                            for &s in &audio_buffer { full_sum_sq += s * s; }
-                            let full_rms = (full_sum_sq / audio_buffer.len() as f32).sqrt();
-
-                            if full_rms >= silence_threshold {
-                                if let Ok(text) = transcriber.transcribe(&audio_buffer) {
-                                    if !text.is_empty() {
-                                        let _ = event_tx.send(WorkerEvent::FinalTranscription(text));
-                                    }
+                    if new_rms < silence_threshold {
+                        // VAD: тишина → финализируем
+                        if !audio_buffer.is_empty() && compute_rms(&audio_buffer) >= silence_threshold {
+                            if let Ok(text) = transcriber.transcribe(&audio_buffer) {
+                                if !text.is_empty() {
+                                    let _ = event_tx.send(WorkerEvent::FinalTranscription(text));
                                 }
                             }
-                            audio_buffer.clear();
-                            last_rms_idx = 0;
                         }
-                    } else if audio_buffer.len() > 16000 * 12 {
-                        // Sliding Window: принудительный рез каждые 12 секунд
+                        audio_buffer.clear();
+                        last_rms_idx = 0;
+
+                    } else if audio_buffer.len() > sliding_window_samples {
+                        // Sliding Window: принудительная нарезка
                         if let Ok(text) = transcriber.transcribe(&audio_buffer) {
                             if !text.is_empty() {
                                 let _ = event_tx.send(WorkerEvent::FinalTranscription(text));
                             }
                         }
-                        // Оставляем последние 1.5 секунды как нахлест (Overlap)
-                        let overlap_len = 24000.min(audio_buffer.len());
-                        let overlap = audio_buffer[audio_buffer.len() - overlap_len..].to_vec();
-                        audio_buffer = overlap;
+                        let overlap = overlap_samples.min(audio_buffer.len());
+                        let tail = audio_buffer[audio_buffer.len() - overlap..].to_vec();
+                        audio_buffer = tail;
                         last_rms_idx = audio_buffer.len();
+
                     } else {
                         // Growing Window: частичное обновление
                         if let Ok(text) = transcriber.transcribe(&audio_buffer) {
@@ -144,8 +132,15 @@ pub fn spawn_audio_worker(
                 }
             }
 
-            // Небольшой сон, чтобы не жарить CPU
             std::thread::sleep(Duration::from_millis(10));
         }
     });
+}
+
+// ─── Утилиты ──────────────────────────────────────────────────────────────────
+
+fn compute_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() { return 0.0; }
+    let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
+    (sum_sq / samples.len() as f32).sqrt()
 }

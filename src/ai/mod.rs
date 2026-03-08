@@ -1,20 +1,4 @@
 // src/ai/mod.rs
-//
-// ╔══════════════════════════════════════════════════════════════════════════════╗
-// ║  AI-модуль: единый интерфейс для всех провайдеров                          ║
-// ║                                                                              ║
-// ║  Поддерживаемые провайдеры:                                                 ║
-// ║    • Gemini  (Google)    — по умолчанию: gemini-2.0-flash                  ║
-// ║    • OpenAI              — gpt-4o, gpt-4o-mini, o1, ...                    ║
-// ║    • Claude  (Anthropic) — claude-opus-4-6, claude-sonnet-4-6, ...         ║
-// ║    • DeepSeek            — deepseek-chat, deepseek-reasoner, ...            ║
-// ║    • Ollama  (локально)  — llama3, mistral, qwen2.5, ...                   ║
-// ║                                                                              ║
-// ║  Как переключить модель (одна строка в main.rs):                            ║
-// ║    let ai = AiConfig::gemini("...key...").build();                          ║
-// ║    let ai = AiConfig::openai("...key...").model("gpt-4o").build();          ║
-// ║    let ai = AiConfig::ollama().model("llama3").build();                     ║
-// ╚══════════════════════════════════════════════════════════════════════════════╝
 
 pub mod gemini;
 pub mod openai;
@@ -24,18 +8,15 @@ pub mod deepseek;
 pub mod http;
 
 use std::fmt;
+use crate::config::{AppConfig, SharedConfig};
 
 // ─── Ошибки ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 pub enum AiError {
-    /// HTTP-запрос не отправился (сеть, таймаут)
     Http(String),
-    /// Сервер ответил, но JSON неожиданный
     Parse(String),
-    /// Ключ API невалидный или отсутствует
     Auth(String),
-    /// Сервер вернул код ошибки с телом
     Api { status: u16, body: String },
 }
 
@@ -52,21 +33,11 @@ impl fmt::Display for AiError {
 
 impl std::error::Error for AiError {}
 
-// ─── Единый трейт ─────────────────────────────────────────────────────────────
+// ─── Трейт ────────────────────────────────────────────────────────────────────
 
-/// Любой LLM-провайдер реализует этот трейт.
-/// Создай свой провайдер → реализуй два метода → передай `Box<dyn AiClient>`.
 pub trait AiClient: Send + Sync {
-    /// Отправить запрос, получить ответ.
-    ///
-    /// `system_prompt` — системный промпт (инструкции для модели).
-    /// `user_message`  — пользовательский запрос (маркдаун с контекстом экрана + голос).
     fn complete(&self, system_prompt: &str, user_message: &str) -> Result<String, AiError>;
-
-    /// Имя модели для логов.
-    fn model_name(&self) -> &str;
-
-    /// Имя провайдера для логов.
+    fn model_name(&self)    -> &str;
     fn provider_name(&self) -> &str;
 }
 
@@ -126,27 +97,61 @@ Mark uncertain parts with [?].
 - Which columns/blocks are you least confident about and why?
 ";
 
-// ─── Конфиг и фабрика ─────────────────────────────────────────────────────────
+// ─── Фабрика ──────────────────────────────────────────────────────────────────
 
-/// Удобный строитель для создания клиента.
-///
-/// Примеры:
-/// ```
-/// // Gemini (по умолчанию — gemini-2.0-flash)
-/// let ai = AiConfig::gemini("AIza...").build();
-///
-/// // OpenAI с другой моделью
-/// let ai = AiConfig::openai("sk-...").model("gpt-4o-mini").build();
-///
-/// // Локальная Ollama
-/// let ai = AiConfig::ollama().model("qwen2.5:7b").build();
-///
-/// // Claude
-/// let ai = AiConfig::claude("sk-ant-...").model("claude-sonnet-4-6").build();
-///
-/// // DeepSeek
-/// let ai = AiConfig::deepseek("...").model("deepseek-reasoner").build();
-/// ```
+/// Создаёт AI-клиент на основе конфига.
+/// `shared` передаётся в клиент для чтения temperature/max_tokens в runtime.
+pub fn build_ai_client_from_config(
+    cfg: &AppConfig,
+    shared: SharedConfig,
+) -> Box<dyn AiClient> {
+    let provider  = cfg.ai.provider.as_str();
+    let model     = cfg.ai.model.clone();
+
+    match provider {
+        "gemini" => Box::new(gemini::GeminiClient::new(
+            env_key("GEMINI_API_KEY"),
+            model,
+            shared,
+        )),
+        "openai" => Box::new(openai::OpenAiClient::new(
+            env_key("OPENAI_API_KEY"),
+            model,
+            shared,
+        )),
+        "claude" => Box::new(claude::ClaudeClient::new(
+            env_key("ANTHROPIC_API_KEY"),
+            model,
+            shared,
+        )),
+        "deepseek" => Box::new(deepseek::DeepSeekClient::new(
+            env_key("DEEPSEEK_API_KEY"),
+            model,
+            shared,
+        )),
+        "ollama" | _ => {
+            let base_url = cfg.ai.ollama.base_url.clone();
+            Box::new(ollama::OllamaClient::new(base_url, model, shared))
+        }
+    }
+}
+
+/// Читает ключ API из переменной окружения с понятным сообщением при отсутствии.
+pub fn env_key(var: &str) -> String {
+    std::env::var(var).unwrap_or_else(|_| {
+        eprintln!(
+            "⚠️  Переменная окружения {} не установлена.\n   \
+             Установи: export {}=\"твой-ключ\"\n   \
+             Или добавь в ~/.zshrc",
+            var, var
+        );
+        String::new()
+    })
+}
+
+// ─── Устаревший строитель (оставлен для совместимости) ────────────────────────
+
+/// Используй `build_ai_client_from_config` для новых проектов.
 pub struct AiConfig {
     provider: Provider,
     model:    Option<String>,
@@ -161,60 +166,26 @@ enum Provider {
 }
 
 impl AiConfig {
-    /// Google Gemini. Дефолтная модель: `gemini-2.0-flash`.
     pub fn gemini(api_key: impl Into<String>) -> Self {
         Self { provider: Provider::Gemini { api_key: api_key.into() }, model: None }
     }
-
-    /// OpenAI. Дефолтная модель: `gpt-4o`.
     pub fn openai(api_key: impl Into<String>) -> Self {
         Self { provider: Provider::OpenAi { api_key: api_key.into() }, model: None }
     }
-
-    /// Anthropic Claude. Дефолтная модель: `claude-sonnet-4-6`.
     pub fn claude(api_key: impl Into<String>) -> Self {
         Self { provider: Provider::Claude { api_key: api_key.into() }, model: None }
     }
-
-    /// DeepSeek. Дефолтная модель: `deepseek-chat`.
     pub fn deepseek(api_key: impl Into<String>) -> Self {
         Self { provider: Provider::DeepSeek { api_key: api_key.into() }, model: None }
     }
-
-    /// Ollama (локально). Дефолтный адрес: `http://localhost:11434`. Дефолтная модель: `llama3`.
     pub fn ollama() -> Self {
         Self::ollama_at("http://localhost:11434")
     }
-
-    /// Ollama с кастомным адресом.
     pub fn ollama_at(base_url: impl Into<String>) -> Self {
         Self { provider: Provider::Ollama { base_url: base_url.into() }, model: None }
     }
-
-    /// Переопределить модель.
     pub fn model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
         self
-    }
-
-    /// Создать клиента.
-    pub fn build(self) -> Box<dyn AiClient> {
-        match self.provider {
-            Provider::Gemini { api_key } => Box::new(
-                gemini::GeminiClient::new(api_key, self.model.unwrap_or_else(|| "gemini-2.5-flash".into()))
-            ),
-            Provider::OpenAi { api_key } => Box::new(
-                openai::OpenAiClient::new(api_key, self.model.unwrap_or_else(|| "gpt-4o".into()))
-            ),
-            Provider::Claude { api_key } => Box::new(
-                claude::ClaudeClient::new(api_key, self.model.unwrap_or_else(|| "claude-sonnet-4-6".into()))
-            ),
-            Provider::DeepSeek { api_key } => Box::new(
-                deepseek::DeepSeekClient::new(api_key, self.model.unwrap_or_else(|| "deepseek-chat".into()))
-            ),
-            Provider::Ollama { base_url } => Box::new(
-                ollama::OllamaClient::new(base_url, self.model.unwrap_or_else(|| "qwen3.5:0.8b".into()))
-            ),
-        }
     }
 }
