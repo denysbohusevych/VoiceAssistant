@@ -73,6 +73,9 @@ pub trait AiClient: Send + Sync {
 // ─── Системный промпт по умолчанию ────────────────────────────────────────────
 
 pub const DEFAULT_SYSTEM_PROMPT: &str = "\
+You are a concise assistant.
+Do not output reasoning, thinking, or chain-of-thought.
+Return only the final answer.
 You are a UI layout analyzer. You receive raw OCR output structured as XML geometry — \
 coordinates, font sizes, and text. No semantic roles are pre-assigned.
 
@@ -210,7 +213,7 @@ impl AiConfig {
                 deepseek::DeepSeekClient::new(api_key, self.model.unwrap_or_else(|| "deepseek-chat".into()))
             ),
             Provider::Ollama { base_url } => Box::new(
-                ollama::OllamaClient::new(base_url, self.model.unwrap_or_else(|| "qwen2.5:7b".into()))
+                ollama::OllamaClient::new(base_url, self.model.unwrap_or_else(|| "qwen3.5:0.8b".into()))
             ),
         }
     }

@@ -68,7 +68,7 @@ fn build_ai_client() -> Box<dyn ai::AiClient> {
 
     // Ollama — локально, приватно, без ключей
     // AiConfig::ollama().model("llama3").build()
-     AiConfig::ollama().model("qwen2.5:7b").build()
+     AiConfig::ollama().model("qwen3.5:0.8b").build()
     // AiConfig::ollama().model("mistral").build()
 }
 
