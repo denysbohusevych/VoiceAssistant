@@ -210,7 +210,7 @@ impl AiConfig {
                 deepseek::DeepSeekClient::new(api_key, self.model.unwrap_or_else(|| "deepseek-chat".into()))
             ),
             Provider::Ollama { base_url } => Box::new(
-                ollama::OllamaClient::new(base_url, self.model.unwrap_or_else(|| "llama3".into()))
+                ollama::OllamaClient::new(base_url, self.model.unwrap_or_else(|| "qwen2.5:7b".into()))
             ),
         }
     }

@@ -37,7 +37,8 @@ impl AiClient for OllamaClient {
             ],
             "options": {
                 "temperature": 0.7,
-                "num_predict": 2048
+                "num_predict": 2048,
+                "num_ctx": 16000
             }
         });
 

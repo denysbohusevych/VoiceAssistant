@@ -43,7 +43,7 @@ const WHISPER_MODEL_PATH: &str = "models/ggml-large-v3-turbo.bin";
 
 fn build_ai_client() -> Box<dyn ai::AiClient> {
     // ✅ АКТИВНО: Gemini 2.0 Flash (быстрый, дешёвый, хорошо работает с кодом)
-    AiConfig::gemini(env_key("GEMINI_API_KEY")).build()
+    //AiConfig::gemini(env_key("GEMINI_API_KEY")).build()
 
     // Gemini 2.0 Pro (умнее, но медленнее)
     // AiConfig::gemini(env_key("GEMINI_API_KEY")).model("gemini-2.0-pro").build()
@@ -68,7 +68,7 @@ fn build_ai_client() -> Box<dyn ai::AiClient> {
 
     // Ollama — локально, приватно, без ключей
     // AiConfig::ollama().model("llama3").build()
-    // AiConfig::ollama().model("qwen2.5:7b").build()
+     AiConfig::ollama().model("qwen2.5:7b").build()
     // AiConfig::ollama().model("mistral").build()
 }
 
