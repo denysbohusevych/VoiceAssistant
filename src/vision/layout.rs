@@ -24,6 +24,130 @@ pub struct AXNode {
     pub children:    Option<Vec<AXNode>>,
 }
 
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let end = s.char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    format!("{}…", &s[..end])
+}
+
+impl AXNode {
+    /// Рекурсивно выводит дерево в консоль с отступами
+    pub fn print_tree(&self, depth: usize) {
+        let indent = "  ".repeat(depth);
+
+        let mut parts = vec![format!("[{}]", self.role)];
+
+        if let Some(t) = &self.title {
+            let t = t.trim();
+            if !t.is_empty() {
+                parts.push(format!("title='{}'", truncate_chars(t, 300)));
+            }
+        }
+        if let Some(v) = &self.value {
+            let v = v.trim();
+            if !v.is_empty() {
+                parts.push(format!("value='{}'", v));
+            }
+        }
+        if let Some(d) = &self.description {
+            let d = d.trim();
+            if !d.is_empty() {
+                parts.push(format!("desc='{}'", truncate_chars(d, 300)));
+            }
+        }
+        if let Some(f) = &self.frame {
+            parts.push(format!(
+                "frame=({},{} {}x{})",
+                f.x as i32, f.y as i32, f.w as i32, f.h as i32
+            ));
+        }
+
+        println!("{}{}", indent, parts.join(" "));
+
+        if let Some(children) = &self.children {
+            for child in children {
+                child.print_tree(depth + 1);
+            }
+        }
+    }
+
+    /// Считает общее количество узлов в дереве
+    pub fn total_nodes(&self) -> usize {
+        1 + self.children
+            .as_ref()
+            .map_or(0, |c| c.iter().map(|ch| ch.total_nodes()).sum())
+    }
+
+    /// Считает узлы с хоть каким-то контентом
+    pub fn content_nodes(&self) -> usize {
+        let has_content = self.title.as_ref().is_some_and(|s| !s.trim().is_empty())
+            || self.value.as_ref().is_some_and(|s| !s.trim().is_empty())
+            || self.description.as_ref().is_some_and(|s| !s.trim().is_empty());
+
+        has_content as usize
+            + self.children
+            .as_ref()
+            .map_or(0, |c| c.iter().map(|ch| ch.content_nodes()).sum())
+    }
+}
+
+/// Печатает полный дамп DumpOutput в консоль для отладки.
+/// Используй так:
+///   let dump: DumpOutput = serde_json::from_str(&json)?;
+///   print_dump_debug(&dump);
+pub fn print_dump_debug(dump: &DumpOutput) {
+    println!("╔══════════════════════════════════════════════════════════╗");
+    println!("║                   AX TREE DEBUG DUMP                    ║");
+    println!("╚══════════════════════════════════════════════════════════╝");
+
+    match &dump.ax_tree {
+        None => {
+            println!("⚠️  ax_tree = None (пустое дерево)");
+        }
+        Some(root) => {
+            let total   = root.total_nodes();
+            let content = root.content_nodes();
+            println!("✅ ax_tree присутствует");
+            println!("   Всего узлов:     {}", total);
+            println!("   Узлов с текстом: {}", content);
+            if let Some(f) = &root.frame {
+                println!(
+                    "   Размер окна:     {}x{} @ ({},{})",
+                    f.w as i32, f.h as i32, f.x as i32, f.y as i32
+                );
+            }
+            println!();
+            println!("── AX Tree ─────────────────────────────────────────────");
+            root.print_tree(0);
+            println!("────────────────────────────────────────────────────────");
+        }
+    }
+
+    println!();
+    println!(
+        "── OCR Text ({} nodes) ──────────────────────────────────",
+        dump.ocr_text.len()
+    );
+    for (i, node) in dump.ocr_text.iter().enumerate() {
+        println!(
+            "  [{}] '{}' @ ({},{} {}x{})",
+            i,
+            truncate_chars(node.text.trim(), 60),
+            node.frame.x as i32,
+            node.frame.y as i32,
+            node.frame.w as i32,
+            node.frame.h as i32,
+        );
+    }
+    println!("────────────────────────────────────────────────────────");
+}
+
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct OCRNode {
     pub text:  String,
@@ -406,6 +530,9 @@ pub fn build_layout_from_dump_with(
         Ok(d)  => d,
         Err(e) => return format!("Parse error: {}", e),
     };
+
+    print_dump_debug(&dump);
+
 
     let title = dump.ax_tree.as_ref()
         .and_then(|t| t.title.clone())

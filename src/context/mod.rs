@@ -82,7 +82,7 @@ pub fn spawn_worker(
                                     {
                                         Ok(out) if out.status.success() => {
                                             let json_str = String::from_utf8_lossy(&out.stdout);
-
+                                           // println!("{}", json_str);
                                             // Читаем layout-конфиг из SharedConfig
                                             let (layout_cfg, ax_min_nodes, ax_min_coverage) = {
                                                 let c = cfg.read().unwrap();
